@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<!-- No zoom, and cover the notch / home-indicator areas (we paint them black). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#000000">
+<!-- Home-screen app on iPad: no Safari UI, nothing that can "exit fullscreen". -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Måneby">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>Måneby (iPad)</title>
+<style>
+  /* Everything this page owns is non-selectable, has no long-press callout,
+     no tap flash, and no browser gesture handling. WebKit needs the -webkit-
+     prefixes; the unprefixed ones are for everyone else. */
+  *, *::before, *::after {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    box-sizing: border-box;
+  }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000; color: #fff;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-text-size-adjust: 100%;
+    font: 400 17px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  /* position: fixed body stops iOS rubber-band scrolling of the page itself. */
+  body { position: fixed; inset: 0; }
+
+  #stage {
+    position: fixed;
+    /* Keep the game out from under the rounded corners / home indicator. */
+    top: env(safe-area-inset-top); right: env(safe-area-inset-right);
+    bottom: env(safe-area-inset-bottom); left: env(safe-area-inset-left);
+    background: #000;
+  }
+  #game { display: block; width: 100%; height: 100%; border: 0; background: #000; touch-action: none; }
+  /* The engine is ~8 MB: say so instead of showing a black screen. */
+  #stage.loading #game { visibility: hidden; }
+  #stage.loading::after {
+    content: "Henter spillet …"; position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,.7); font-size: 20px;
+  }
+
+  /* Start screen. A tap here is the user gesture that lets the game play sound. */
+  #start {
+    position: fixed; inset: 0; z-index: 2;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    padding: 24px;
+    background: radial-gradient(circle at 50% 40%, #1d2450, #0a0d1f 70%);
+  }
+  #start[hidden] { display: none; }
+  h1 { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: .01em; text-align: center; }
+  .langs { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .langs button, #go {
+    font: inherit; color: #fff; cursor: pointer;
+    min-height: 48px; padding: 10px 18px; border-radius: 12px;
+    border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.06);
+    touch-action: manipulation;
+  }
+  .langs button[aria-pressed="true"] { border-color: #ff9d3f; background: rgba(255,157,63,.18); }
+  #go {
+    min-width: 220px; min-height: 64px; font-size: 22px; font-weight: 650;
+    border-color: #ff9d3f; background: #ff9d3f; color: #1a0f00;
+  }
+  #go:active { filter: brightness(.9); }
+  .hint { max-width: 34rem; margin: 0; text-align: center; color: rgba(255,255,255,.65); font-size: 14px; }
+  .hint[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="start">
+  <h1>Matematik i Måneby</h1>
+  <div class="langs" role="group" aria-label="Sprog">
+    <button type="button" data-lang="DA">Dansk</button>
+    <button type="button" data-lang="SV">Svenska</button>
+    <button type="button" data-lang="NO">Norsk</button>
+    <button type="button" data-lang="NY">Nynorsk</button>
+    <button type="button" data-lang="EN">English</button>
+  </div>
+  <button type="button" id="go">▶ Start</button>
+  <p class="hint" id="install-hint" hidden>
+    Tip: Tryk på Del&nbsp;→ <b>Føj til hjemmeskærm</b>, og åbn spillet derfra.
+    Så er der ingen Safari-bjælker, og intet kan smide dig ud af fuld skærm.
+  </p>
+  <p class="hint">
+    Spillet hentes fra maaneby.dk. Gemte spil her er adskilt fra dem på maaneby.dk:
+    brug «Hent en kopi» / «Hent spil» for at flytte et gemt spil.
+  </p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var GAME = 'https://maaneby.dk/game/';
+  var LANGS = ['DA', 'SV', 'NO', 'NY', 'EN'];
+  var KEY = 'maaneby-wrapper-lang';
+
+  var params = new URLSearchParams(location.search);
+  var lang = (params.get('lang') || '').toUpperCase();
+  if (LANGS.indexOf(lang) < 0) {
+    try { lang = localStorage.getItem(KEY) || ''; } catch (e) { lang = ''; }
+  }
+  if (LANGS.indexOf(lang) < 0) lang = 'DA';
+
+  var start = document.getElementById('start');
+  var stage = document.getElementById('stage');
+  var frame = null;
+
+  // Language buttons.
+  var langButtons = start.querySelectorAll('[data-lang]');
+  function markLang() {
+    for (var i = 0; i < langButtons.length; i++) {
+      langButtons[i].setAttribute('aria-pressed', String(langButtons[i].dataset.lang === lang));
+    }
+  }
+  for (var i = 0; i < langButtons.length; i++) {
+    langButtons[i].addEventListener('click', function (e) {
+      lang = e.currentTarget.dataset.lang;
+      try { localStorage.setItem(KEY, lang); } catch (err) {}
+      markLang();
+    });
+  }
+  markLang();
+
+  // Show the "Add to Home Screen" tip only in a Safari tab, not once installed.
+  var standalone = navigator.standalone === true ||
+    (window.matchMedia && (matchMedia('(display-mode: fullscreen)').matches ||
+                           matchMedia('(display-mode: standalone)').matches));
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (isIOS && !standalone) document.getElementById('install-hint').hidden = false;
+
+  function gameUrl() {
+    var q = new URLSearchParams({ lang: lang });
+    var k = params.get('klassetrin');
+    if (k && /^[1-6]$/.test(k)) q.set('klassetrin', k);
+    return GAME + '?' + q;
+  }
+
+  function focusGame() {
+    if (!frame) return;
+    try { frame.contentWindow.focus(); } catch (e) {}
+    try { frame.focus({ preventScroll: true }); } catch (e) { frame.focus(); }
+  }
+
+  document.getElementById('go').addEventListener('click', function () {
+    frame = document.createElement('iframe');
+    frame.id = 'game';
+    frame.title = 'Matematik i Måneby';
+    frame.allow = 'autoplay; fullscreen';
+    frame.setAttribute('tabindex', '0');
+    frame.src = gameUrl();
+    frame.addEventListener('load', function () {
+      stage.classList.remove('loading');
+      focusGame();
+    });
+    stage.classList.add('loading');
+    stage.appendChild(frame);
+    start.hidden = true;
+    focusGame();
+  });
+
+  // Keep hardware-keyboard keys (Esc, arrows, space) going to the game: if
+  // focus ever lands back on this page, hand it to the iframe.
+  window.addEventListener('focus', function () { setTimeout(focusGame, 0); });
+  document.addEventListener('pointerdown', function () { if (frame) focusGame(); }, true);
+
+  // No browser zoom, scroll, bounce, selection or context menu on this page.
+  // (Inside the iframe the game handles its own; these cover the edges and
+  // the safe-area bars around it.)
+  function block(e) { if (e.cancelable) e.preventDefault(); }
+  ['gesturestart', 'gesturechange', 'gestureend', 'contextmenu', 'selectstart', 'dragstart']
+    .forEach(function (t) { document.addEventListener(t, block, { passive: false }); });
+  document.addEventListener('touchmove', block, { passive: false });
+  document.addEventListener('touchstart', function (e) {
+    if (e.touches.length > 1) block(e);
+  }, { passive: false });
+  var lastEnd = 0;
+  document.addEventListener('touchend', function (e) {
+    var now = Date.now();
+    // A quick second tap on this page would be double-tap-zoom; but let taps
+    // on our own buttons through, so the click still fires.
+    if (now - lastEnd < 350 && !(e.target.closest && e.target.closest('button'))) block(e);
+    lastEnd = now;
+  }, { passive: false });
+  document.addEventListener('dblclick', block, { passive: false });
+  // Ctrl/Cmd + wheel (trackpad pinch) would zoom.
+  document.addEventListener('wheel', function (e) { if (e.ctrlKey || e.metaKey) block(e); }, { passive: false });
+  // Clear any selection that sneaks in anyway.
+  document.addEventListener('selectionchange', function () {
+    var s = window.getSelection && window.getSelection();
+    if (s && s.rangeCount && !s.isCollapsed) s.removeAllRanges();
+  });
+
+  // Ask the browser not to evict our (partitioned) storage, where it supports it.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
+})();
+</script>
+</body>
+</html>
